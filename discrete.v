@@ -1,58 +1,68 @@
 `default_nettype none
 
-// `define DISCRETE_FORMAL
+`define DISCRETE_FORMAL
 
 module core ();
     alu alu (.i_op(), .i_op1(), .i_op2(), .i_sub(), .o_result());
     comparator comp (.i_op1(), .i_op2());
     shifter shifter (.i_op1(), .i_op2(), .o_result());
+    rf rf ();
 endmodule
 
-// This is a module of an external 32K 8bit-word SRAM. It's external to the
-// design and therefore not optimized, just a cycle accurate model.
-// TODO: this is a fake interface, the actual chip is level triggered
-// module sram_32k8 (
-//     input  wire        i_clk,
-//     input  wire        i_rst_n,
-//     input  wire [14:0] i_addr,
-//     input  wire [7:0]  i_data,
-//     input  wire        i_wen,
-//     output wire [7:0]  o_data
-// );
-//     reg [7:0] mem [14:0];
-//     always @(posedge i_clk, negedge i_rst_n) begin
-//         if (!i_rst_n) begin
-//             for (integer i = 0; i < 32768; i = i + 1) mem[i] <= 8'h00;
-//         end else begin
-//             if (i_wen) mem[i_addr] <= i_data;
-//         end
-//     end
-//
-//     assign o_data = mem[i_addr];
-// endmodule
+module sram (
+    input  wire [4:0] i_addr,
+    input  wire       i_wen,
+    input  wire [7:0] i_data,
+    output wire [7:0] o_data
+);
+    reg [7:0] mem [31:0];
+    always @(*) begin
+        if (i_wen)
+            mem[i_addr] <= i_data;
+    end
 
-// module rf (
-//     input  wire        i_clk,
-//     input  wire        i_rst_n,
-//     input  wire [4:0]  i_rs1_addr,
-//     input  wire [4:0]  i_rs2_addr,
-//     input  wire [4:0]  i_rd_addr,
-//     input  wire        i_rd_wen,
-//     input  wire [31:0] i_rd_wdata,
-//     output wire [31:0] o_rs1_data,
-//     output wire [31:0] o_rs2_data
-// );
-//     sram_32k8 bank0 [3:0] (
-//         .i_clk(i_clk), .i_rst_n(i_rst_n),
-//         .i_addr({10'h0, i_rs1_addr}),
-//         .i_
-//         .o_data(o_rs1_data)
-//     );
-//     sram_32k8 bank1 [3:0] (
-//         .i_clk(i_clk), .i_rst_n(i_rst_n),
-//         .i_addr()
-//     );
-// endmodule
+    assign o_data = mem[i_addr];
+endmodule
+
+module rf (
+    input  wire        i_clk,
+    input  wire [4:0]  i_rs1_addr,
+    input  wire [4:0]  i_rs2_addr,
+    input  wire [4:0]  i_rd_addr,
+    input  wire        i_rd_wen,
+    input  wire [31:0] i_rd_wdata,
+    output wire [31:0] o_rs1_rdata,
+    output wire [31:0] o_rs2_rdata
+);
+    wire dir = i_clk;
+    // on posedge, write data to both RAMs if write enable asserted
+    // on negedge, read independently from both RAMs
+    wire [4:0] addr0 = dir ? i_rd_addr : i_rs1_addr;
+    wire [4:0] addr1 = dir ? i_rd_addr : i_rs2_addr;
+
+    wire wen = dir && i_rd_wen;
+    wire [31:0] rs1_zero = {32{!|i_rs1_addr}};
+    wire [31:0] rs2_zero = {32{!|i_rs2_addr}};
+
+    wire [31:0] rs1_rdata, rs2_rdata;
+    sram bank0 [3:0] (.i_addr(addr0), .i_wen(wen), .i_data(i_rd_wdata), .o_data(rs1_rdata));
+    sram bank1 [3:0] (.i_addr(addr1), .i_wen(wen), .i_data(i_rd_wdata), .o_data(rs2_rdata));
+
+    // on read, the RAMs will drive the data lines with read data
+    // no need to gate this for read, but we mask so that reads to
+    // x0 output zero despite the underlying write succeeding
+    assign o_rs1_rdata = rs1_rdata & ~rs1_zero;
+    assign o_rs2_rdata = rs2_rdata & ~rs2_zero;
+
+`ifdef DISCRETE_FORMAL
+    always @(*) begin
+        if (i_rs1_addr == 0)
+            assert (o_rs1_rdata == 32'h0);
+        if (i_rs2_addr == 0)
+            assert (o_rs2_rdata == 32'h0);
+    end
+`endif
+endmodule
 
 // 32 bit ripple carry adder
 module rca (
@@ -161,18 +171,18 @@ module comparator (
     output wire        o_geu
 );
     // equality
-    wire o_eq = &(i_op1 ~^ i_op2);
-    wire o_ne = !o_eq;
+    assign o_eq = &(i_op1 ~^ i_op2);
+    assign o_ne = !o_eq;
 
     // less than
     wire [31:0] ltu_bits;
     assign ltu_bits = (~i_op1 & i_op2) | ((i_op1 ~^ i_op2) & {ltu_bits[30:0], 1'b0});
-    wire o_lt = (i_op1[31] == i_op2[31]) ? ltu_bits[30] : i_op1[31];
-    wire o_ltu = ltu_bits[31];
+    assign o_lt = (i_op1[31] == i_op2[31]) ? ltu_bits[30] : i_op1[31];
+    assign o_ltu = ltu_bits[31];
 
     // greater than equal
-    wire o_ge = !o_lt | o_eq;
-    wire o_geu = !o_ltu | o_eq;
+    assign o_ge = !o_lt | o_eq;
+    assign o_geu = !o_ltu | o_eq;
 
 `ifdef DISCRETE_FORMAL
     always @(*) begin
