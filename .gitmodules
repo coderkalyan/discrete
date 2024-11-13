@@ -1,0 +1,3 @@
+[submodule "formal/riscv-formal"]
+	path = formal/riscv-formal
+	url = git@github.com:YosysHQ/riscv-formal

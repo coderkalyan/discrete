@@ -14,9 +14,14 @@
 `define RD_MEM 1
 `define RD_PC 2
 
-module core (
+module discrete_core (
     input  wire        i_clk,
     input  wire        i_rst_n,
+
+    `ifdef RISCV_FORMAL
+        `RVFI_OUTPUTS,
+    `endif
+
     input  wire [31:0] o_imem_addr,
     output wire [31:0] i_imem_rdata,
     output wire [31:0] o_dmem_addr,
@@ -63,7 +68,12 @@ module core (
     rf rf (
         .i_clk(i_clk),
         .i_rs1_addr(rs1_addr), .i_rs2_addr(rs2_addr), .i_rd_addr(rd_addr),
-        .i_rd_wen(rd_wen), .i_rd_wdata(rd_wdata),
+        `ifdef RISCV_FORMAL
+        .i_rd_wen(rd_wen && rvfm_valid),
+        `else
+        .i_rd_wen(rd_wen),
+        `endif
+        .i_rd_wdata(rd_wdata),
         .o_rs1_rdata(rs1_rdata), .o_rs2_rdata(rs2_rdata)
     );
 
@@ -72,7 +82,7 @@ module core (
 
     wire eq, lt, ltu;
     comparator comp (
-        .i_op1(rs1_rdata), .i_op2(rs2_rdata),
+        .i_op1(rs1_rdata), .i_op2(op2),
         .o_eq(eq), .o_lt(lt), .o_ltu(ltu)
     );
     wire take = (branch_equal ? eq : (branch_unsigned ? ltu : lt)) ^ branch_invert;
@@ -88,14 +98,157 @@ module core (
     assign o_dmem_addr = alu_result;
     assign o_dmem_wdata = rs2_rdata;
 
+`ifdef RISCV_FORMAL
+    wire [31:0] pc_inc = !rvfm_valid ? pc : (pc + 32'h4);
+`else
     wire [31:0] pc_inc = pc + 32'h4;
+`endif
     wire pc_sel = jump || (branch && take);
-    assign next_pc = pc_sel ? alu_result : pc_inc;
+    assign next_pc = pc_sel ? {alu_result[31:1], 1'b0} : pc_inc;
 
     wire [31:0] rd_sel_alu = {32{rd_sel[`RD_ALU]}};
     wire [31:0] rd_sel_mem = {32{rd_sel[`RD_MEM]}};
     wire [31:0] rd_sel_pc  = {32{rd_sel[`RD_PC]}};
     assign rd_wdata = (alu_result & rd_sel_alu) | (32'h0 & rd_sel_mem) | (pc_inc & rd_sel_pc);
+
+`ifdef RISCV_FORMAL
+// Formal monitor for the discrete core. This is included in the
+// core when it's being verified, and disabled for synthesis.
+
+wire [6:0] rvfm_opcode = inst[6:0];
+wire [2:0] rvfm_funct3 = inst[14:12];
+wire [6:0] rvfm_funct7 = inst[31:25];
+
+// The discrete core is an in-order single cycle core,
+// so it "retires" a single instruction every clock cycle. However,
+// the core invokes undefined behavior when illegal
+// instructions are passed; in order to satisfy the formal interface,
+// the formal monitor validates incoming instructions.
+reg rvfm_valid;
+always @(*) begin
+    rvfm_valid = 1'b0;
+
+    case (rvfm_opcode)
+        // lui, auipc, jal
+        7'b0110111, 7'b0010111, 7'b1101111: rvfm_valid = 1'b1;
+        // jalr
+        7'b1100111: rvfm_valid = rvfm_funct3 == 3'b000;
+        // beq, bne, blt, bge, bltu, bgeu
+        7'b1100011: begin
+            casez (rvfm_funct3)
+                3'b00?, 3'b10?, 3'b11?: rvfm_valid = 1'b1;
+            endcase
+        end
+        // lb, lh, lw, lbu, lhu
+        7'b0000011: begin
+            case (rvfm_funct3)
+                3'b000, 3'b001, 3'b010, 3'b100, 3'b101: rvfm_valid = 1'b1;
+            endcase
+        end
+        // sb, sh, sw
+        7'b0100011: begin
+            case (rvfm_funct3)
+                3'b000, 3'b001, 3'b010: rvfm_valid = 1'b1;
+            endcase
+        end
+        // addi, slti, sltiu, xori, ori, andi, slli, srli, srai
+        7'b0010011: begin
+            case (rvfm_funct3)
+                // addi, slti, sltiu
+                3'b000, 3'b010, 3'b011: rvfm_valid = 1'b1;
+                // xori, ori, andi
+                3'b100, 3'b110, 3'b111: rvfm_valid = 1'b1;
+                // slli
+                3'b001: rvfm_valid = rvfm_funct7 == 7'b0000000;
+                // srli, srai
+                3'b101: rvfm_valid = rvfm_funct7 == 7'b0000000 || rvfm_funct7 == 3'b0100000;
+            endcase
+        end
+        // add, sub, sll, slt, sltu, xor, srl, sra, or, and
+        7'b0110011: begin
+            case (rvfm_funct3)
+                // add, sub
+                3'b000: rvfm_valid = rvfm_funct7 == 7'b0000000 || rvfm_funct7 == 3'b0100000;
+                // slt, sltu
+                3'b010, 3'b011: rvfm_valid = rvfm_funct7 == 7'b0000000;
+                // xor, or, and
+                3'b100, 3'b110, 3'b111: rvfm_valid = rvfm_funct7 == 7'b0000000;
+                // sll
+                3'b001: rvfm_valid = rvfm_funct7 == 7'b0000000;
+                // srl, sra
+                3'b101: rvfm_valid = rvfm_funct7 == 7'b0000000 || rvfm_funct7 == 3'b0100000;
+            endcase
+        end
+    endcase
+end
+
+// In order retire
+reg [63:0] rvfm_retire_ctr;
+always @(posedge i_clk, negedge i_rst_n) begin
+    if (!i_rst_n)
+        rvfm_retire_ctr <= 64'h0;
+    else if (rvfi_valid)
+        rvfm_retire_ctr <= rvfm_retire_ctr + 64'h1;
+end
+
+// trap on invalid instruction, misaligned memory access, misaligned jump
+reg rvfm_trap;
+always @(*) begin
+    rvfm_trap = 1'b0;
+
+    if (!rvfm_valid) begin
+        rvfm_trap = 1'b1;
+    end else begin
+        case (rvfm_opcode)
+            // load misaligned
+            7'b0000011: begin
+                case (rvfm_funct3)
+                    3'b010: rvfm_trap = alu_result[1:0] != 2'b00;
+                    3'b001, 3'b101: rvfm_trap = alu_result[0] != 1'b0;
+                endcase
+            end
+            // store misaligned
+            7'b0100011: begin
+                case (rvfm_funct3)
+                    3'b010: rvfm_trap = alu_result[1:0] != 2'b00;
+                    3'b001: rvfm_trap = alu_result[0] != 1'b0;
+                endcase
+            end
+            // branch target misaligned
+            7'b1100011: rvfm_trap = imm[1:0] != 2'b00;
+            // jal target misaligned
+            7'b1101111: rvfm_trap = imm[1:0] != 2'b00;
+            // jalr target misaligned
+            7'b1100111: rvfm_trap = alu_result[2:0] != 2'b00;
+        endcase
+    end
+end
+
+assign rvfi_valid = rvfm_valid;
+assign rvfi_order = rvfm_retire_ctr;
+assign rvfi_insn  = inst;
+assign rvfi_trap  = rvfm_trap;
+assign rvfi_halt  = 1'b0;
+assign rvfi_intr  = 1'b0;
+assign rvfi_mode  = 2'b11; // M-mode
+assign rvfi_ixl   = 2'b01;  // 32 bit - TODO
+
+assign rvfi_rs1_addr = rs1_addr;
+assign rvfi_rs2_addr = rs2_addr;
+assign rvfi_rs1_rdata = rs1_rdata;
+assign rvfi_rs2_rdata = rs2_rdata;
+assign rvfi_rd_addr = rd_wen ? rd_addr : 5'h0;
+assign rvfi_rd_wdata = (rvfi_rd_addr == 5'h0) ? 32'h0 : rd_wdata;
+
+assign rvfi_pc_rdata = pc;
+assign rvfi_pc_wdata = next_pc;
+
+assign rvfi_mem_addr = 32'hx;
+assign rvfi_mem_rmask = 4'h0;
+assign rvfi_mem_wmask = 4'h0;
+assign rvfi_mem_rdata = 32'h0;
+assign rvfi_mem_wdata = 32'h0;
+`endif
 endmodule
 
 module decoder (
@@ -156,7 +309,7 @@ module decoder (
     assign o_rd_sel[`RD_PC] = op_jal || op_jalr;
 
     assign o_op1_sel = op_branch || op_auipc || op_jal;
-    assign o_op2_sel = op_load || op_op_imm || op_auipc || op_store || op_lui || op_branch || op_jal;
+    assign o_op2_sel = op_load || op_op_imm || op_auipc || op_store || op_lui || op_branch || op_jal || op_jalr;
 
     wire op_inst = op_op_imm || op_op;
     assign o_alu_op[`ALU_OP_ADD] = (op_inst && alu_add) || op_load || op_auipc || op_store || op_lui || op_branch || op_jalr || op_jal;
@@ -251,8 +404,17 @@ module rf (
     wire [31:0] rs2_zero = {32{!(|i_rs2_addr)}};
 
     wire [31:0] rs1_rdata, rs2_rdata;
-    // sram bank0 [3:0] (.i_addr(addr0), .i_wen(wen), .i_data(i_rd_wdata), .o_data(rs1_rdata));
-    // sram bank1 [3:0] (.i_addr(addr1), .i_wen(wen), .i_data(i_rd_wdata), .o_data(rs2_rdata));
+`ifdef RISCV_FORMAL
+    (* keep *) reg [31:0] file [0:31];
+    assign rs1_rdata = file[i_rs1_addr];
+    assign rs2_rdata = file[i_rs2_addr];
+    always @(posedge i_clk)
+        if (i_rd_wen)
+            file[i_rd_addr] <= i_rd_wdata;
+`else
+    sram bank0 [3:0] (.i_addr(addr0), .i_wen(wen), .i_data(i_rd_wdata), .o_data(rs1_rdata));
+    sram bank1 [3:0] (.i_addr(addr1), .i_wen(wen), .i_data(i_rd_wdata), .o_data(rs2_rdata));
+`endif
 
     // on read, the RAMs will drive the data lines with read data
     // no need to gate this for read, but we mask so that reads to

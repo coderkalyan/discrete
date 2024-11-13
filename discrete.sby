@@ -7,7 +7,7 @@ smtbmc z3
 
 [script]
 read -formal discrete.v
-prep -top core
+prep -top discrete_core
 
 [files]
 discrete.v
