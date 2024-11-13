@@ -26,7 +26,9 @@ module discrete_core (
     output wire [31:0] i_imem_rdata,
     output wire [31:0] o_dmem_addr,
     output wire [31:0] o_dmem_wdata,
-    input  wire [31:0] i_dmem_rdata
+    output wire [3:0]  o_dmem_wmask,
+    input  wire        o_dmem_ren,
+    input  wire [31:0] i_dmem_rdata,
 );
     reg [31:0] pc;
     wire [31:0] next_pc;
@@ -43,25 +45,29 @@ module discrete_core (
     wire [4:0] rs1_addr, rs2_addr, rd_addr;
     wire rd_wen;
     wire [2:0] rd_sel;
-    wire op1_sel, op2_sel;
+    wire op1_sel, alu_op2_sel, comp_op2_sel;
     wire [5:0] alu_op;
     wire [1:0] shift_dir;
     wire alu_sub, alu_sltu, shift_arith;
     wire jump, branch;
     wire branch_equal, branch_unsigned, branch_invert;
     wire [31:0] imm;
+    wire [1:0] mem_width;
+    wire mem_ren, mem_wen, mem_unsigned;
     decoder id (
         .i_inst(inst),
         .o_rs1_addr(rs1_addr), .o_rs2_addr(rs2_addr), .o_rd_addr(rd_addr),
         .o_rd_wen(rd_wen), .o_rd_sel(rd_sel),
-        .o_op1_sel(op1_sel), .o_op2_sel(op2_sel),
+        .o_op1_sel(op1_sel), .o_alu_op2_sel(alu_op2_sel), .o_comp_op2_sel(comp_op2_sel),
         .o_alu_op(alu_op), .o_alu_sub(alu_sub), .o_alu_sltu(alu_sltu),
         .o_shift_dir(shift_dir), .o_shift_arith(shift_arith),
         .o_jump(jump), .o_branch(branch),
         .o_branch_equal(branch_equal),
         .o_branch_unsigned(branch_unsigned),
         .o_branch_invert(branch_invert),
-        .o_imm(imm)
+        .o_imm(imm),
+        .o_mem_ren(mem_ren), .o_mem_wen(mem_wen),
+        .o_mem_width(mem_width), .o_mem_unsigned(mem_unsigned)
     );
 
     wire [31:0] rs1_rdata, rs2_rdata, rd_wdata;
@@ -77,16 +83,17 @@ module discrete_core (
         .o_rs1_rdata(rs1_rdata), .o_rs2_rdata(rs2_rdata)
     );
 
-    wire [31:0] op1 = op1_sel ? pc : rs1_rdata;
-    wire [31:0] op2 = op2_sel ? imm : rs2_rdata;
+    wire [31:0] comp_op2 = comp_op2_sel ? imm : rs2_rdata;
 
     wire eq, lt, ltu;
     comparator comp (
-        .i_op1(rs1_rdata), .i_op2(op2),
+        .i_op1(rs1_rdata), .i_op2(comp_op2),
         .o_eq(eq), .o_lt(lt), .o_ltu(ltu)
     );
     wire take = (branch_equal ? eq : (branch_unsigned ? ltu : lt)) ^ branch_invert;
 
+    wire [31:0] op1 = op1_sel ? pc : rs1_rdata;
+    wire [31:0] op2 = alu_op2_sel ? imm : rs2_rdata;
     wire [31:0] alu_result;
     alu alu (
         .i_op(alu_op), .i_sub(alu_sub), .i_sltu(alu_sltu),
@@ -95,8 +102,31 @@ module discrete_core (
         .o_result(alu_result)
     );
 
-    assign o_dmem_addr = alu_result;
-    assign o_dmem_wdata = rs2_rdata;
+    assign o_dmem_addr  = {alu_result[31:2], 2'b00};
+    assign o_dmem_ren   = mem_ren;
+
+    wire [3:0] wmask_w = {4{mem_wen}};
+    wire [3:0] wmask_h = alu_result[1] ? (wmask_w & 4'b1100) : (wmask_w & 4'b0011);
+    wire [3:0] wmask_b = alu_result[0] ? (wmask_h & 4'b1010) : (wmask_h & 4'b0101);
+    assign o_dmem_wmask = mem_width[1] ? wmask_w : (mem_width[0] ? wmask_h : wmask_b);
+
+    wire [31:0] sw = rs2_rdata;
+    wire [31:0] sh = alu_result[1] ? {sw[15:0], 16'h0} : sw;
+    wire [31:0] sb = alu_result[0] ? {sh[23:0], 8'h0}  : sh;
+
+    assign o_dmem_wdata = mem_width[1] ? sw : (mem_width[0] ? sh : sb);
+
+    // TODO: this is only correct if legal memory access boundaries are word
+    // aligned
+    wire [31:0] lw = i_dmem_rdata;
+    wire [15:0] lh = alu_result[1] ? lw[31:16] : lw[15:0];
+    wire [7:0]  lb = alu_result[0] ? lh[15:8] : lh[7:0];
+
+    wire sign = !mem_unsigned && (mem_width[0] ? lh[15] : lb[7]);
+    wire [31:0] load_result;
+    assign load_result[31:16] = mem_width[1] ? lw[31:16] : {16{sign}};
+    assign load_result[15:8]  = mem_width[1] ? lw[15:8]  : (mem_width[0] ? lh[15:8] : {8{sign}});
+    assign load_result[7:0]   = mem_width[1] ? lw[7:0]   : (mem_width[0] ? lh[7:0]  : lb);
 
 `ifdef RISCV_FORMAL
     wire [31:0] pc_inc = !rvfm_valid ? pc : (pc + 32'h4);
@@ -109,7 +139,7 @@ module discrete_core (
     wire [31:0] rd_sel_alu = {32{rd_sel[`RD_ALU]}};
     wire [31:0] rd_sel_mem = {32{rd_sel[`RD_MEM]}};
     wire [31:0] rd_sel_pc  = {32{rd_sel[`RD_PC]}};
-    assign rd_wdata = (alu_result & rd_sel_alu) | (32'h0 & rd_sel_mem) | (pc_inc & rd_sel_pc);
+    assign rd_wdata = (alu_result & rd_sel_alu) | (load_result & rd_sel_mem) | (pc_inc & rd_sel_pc);
 
 `ifdef RISCV_FORMAL
 // Formal monitor for the discrete core. This is included in the
@@ -128,58 +158,60 @@ reg rvfm_valid;
 always @(*) begin
     rvfm_valid = 1'b0;
 
-    case (rvfm_opcode)
-        // lui, auipc, jal
-        7'b0110111, 7'b0010111, 7'b1101111: rvfm_valid = 1'b1;
-        // jalr
-        7'b1100111: rvfm_valid = rvfm_funct3 == 3'b000;
-        // beq, bne, blt, bge, bltu, bgeu
-        7'b1100011: begin
-            casez (rvfm_funct3)
-                3'b00?, 3'b10?, 3'b11?: rvfm_valid = 1'b1;
-            endcase
-        end
-        // lb, lh, lw, lbu, lhu
-        7'b0000011: begin
-            case (rvfm_funct3)
-                3'b000, 3'b001, 3'b010, 3'b100, 3'b101: rvfm_valid = 1'b1;
-            endcase
-        end
-        // sb, sh, sw
-        7'b0100011: begin
-            case (rvfm_funct3)
-                3'b000, 3'b001, 3'b010: rvfm_valid = 1'b1;
-            endcase
-        end
-        // addi, slti, sltiu, xori, ori, andi, slli, srli, srai
-        7'b0010011: begin
-            case (rvfm_funct3)
-                // addi, slti, sltiu
-                3'b000, 3'b010, 3'b011: rvfm_valid = 1'b1;
-                // xori, ori, andi
-                3'b100, 3'b110, 3'b111: rvfm_valid = 1'b1;
-                // slli
-                3'b001: rvfm_valid = rvfm_funct7 == 7'b0000000;
-                // srli, srai
-                3'b101: rvfm_valid = rvfm_funct7 == 7'b0000000 || rvfm_funct7 == 3'b0100000;
-            endcase
-        end
-        // add, sub, sll, slt, sltu, xor, srl, sra, or, and
-        7'b0110011: begin
-            case (rvfm_funct3)
-                // add, sub
-                3'b000: rvfm_valid = rvfm_funct7 == 7'b0000000 || rvfm_funct7 == 3'b0100000;
-                // slt, sltu
-                3'b010, 3'b011: rvfm_valid = rvfm_funct7 == 7'b0000000;
-                // xor, or, and
-                3'b100, 3'b110, 3'b111: rvfm_valid = rvfm_funct7 == 7'b0000000;
-                // sll
-                3'b001: rvfm_valid = rvfm_funct7 == 7'b0000000;
-                // srl, sra
-                3'b101: rvfm_valid = rvfm_funct7 == 7'b0000000 || rvfm_funct7 == 3'b0100000;
-            endcase
-        end
-    endcase
+    if (i_rst_n) begin
+        case (rvfm_opcode)
+            // lui, auipc, jal
+            7'b0110111, 7'b0010111, 7'b1101111: rvfm_valid = 1'b1;
+            // jalr
+            7'b1100111: rvfm_valid = rvfm_funct3 == 3'b000;
+            // beq, bne, blt, bge, bltu, bgeu
+            7'b1100011: begin
+                casez (rvfm_funct3)
+                    3'b00?, 3'b10?, 3'b11?: rvfm_valid = 1'b1;
+                endcase
+            end
+            // lb, lh, lw, lbu, lhu
+            7'b0000011: begin
+                case (rvfm_funct3)
+                    3'b000, 3'b001, 3'b010, 3'b100, 3'b101: rvfm_valid = 1'b1;
+                endcase
+            end
+            // sb, sh, sw
+            7'b0100011: begin
+                case (rvfm_funct3)
+                    3'b000, 3'b001, 3'b010: rvfm_valid = 1'b1;
+                endcase
+            end
+            // addi, slti, sltiu, xori, ori, andi, slli, srli, srai
+            7'b0010011: begin
+                case (rvfm_funct3)
+                    // addi, slti, sltiu
+                    3'b000, 3'b010, 3'b011: rvfm_valid = 1'b1;
+                    // xori, ori, andi
+                    3'b100, 3'b110, 3'b111: rvfm_valid = 1'b1;
+                    // slli
+                    3'b001: rvfm_valid = rvfm_funct7 == 7'b0000000;
+                    // srli, srai
+                    3'b101: rvfm_valid = rvfm_funct7 == 7'b0000000 || rvfm_funct7 == 7'b0100000;
+                endcase
+            end
+            // add, sub, sll, slt, sltu, xor, srl, sra, or, and
+            7'b0110011: begin
+                case (rvfm_funct3)
+                    // add, sub
+                    3'b000: rvfm_valid = rvfm_funct7 == 7'b0000000 || rvfm_funct7 == 7'b0100000;
+                    // slt, sltu
+                    3'b010, 3'b011: rvfm_valid = rvfm_funct7 == 7'b0000000;
+                    // xor, or, and
+                    3'b100, 3'b110, 3'b111: rvfm_valid = rvfm_funct7 == 7'b0000000;
+                    // sll
+                    3'b001: rvfm_valid = rvfm_funct7 == 7'b0000000;
+                    // srl, sra
+                    3'b101: rvfm_valid = (rvfm_funct7 == 7'b0000000) || (rvfm_funct7 == 7'b0100000);
+                endcase
+            end
+        endcase
+    end
 end
 
 // In order retire
@@ -187,7 +219,7 @@ reg [63:0] rvfm_retire_ctr;
 always @(posedge i_clk, negedge i_rst_n) begin
     if (!i_rst_n)
         rvfm_retire_ctr <= 64'h0;
-    else if (rvfi_valid)
+    else if (rvfm_valid)
         rvfm_retire_ctr <= rvfm_retire_ctr + 64'h1;
 end
 
@@ -196,7 +228,7 @@ reg rvfm_trap;
 always @(*) begin
     rvfm_trap = 1'b0;
 
-    if (!rvfm_valid) begin
+    if (!rvfm_valid && !i_rst_n) begin
         rvfm_trap = 1'b1;
     end else begin
         case (rvfm_opcode)
@@ -214,12 +246,8 @@ always @(*) begin
                     3'b001: rvfm_trap = alu_result[0] != 1'b0;
                 endcase
             end
-            // branch target misaligned
-            7'b1100011: rvfm_trap = imm[1:0] != 2'b00;
-            // jal target misaligned
-            7'b1101111: rvfm_trap = imm[1:0] != 2'b00;
-            // jalr target misaligned
-            7'b1100111: rvfm_trap = alu_result[2:0] != 2'b00;
+            // branch, jal, jalr target misaligned
+            7'b1100011, 7'b1101111, 7'b1100111: rvfm_trap = next_pc[1:0] != 2'b00;
         endcase
     end
 end
@@ -230,8 +258,8 @@ assign rvfi_insn  = inst;
 assign rvfi_trap  = rvfm_trap;
 assign rvfi_halt  = 1'b0;
 assign rvfi_intr  = 1'b0;
-assign rvfi_mode  = 2'b11; // M-mode
-assign rvfi_ixl   = 2'b01;  // 32 bit - TODO
+assign rvfi_mode  = 2'd3; // M-mode
+assign rvfi_ixl   = 2'd1; // 32 bit - TODO
 
 assign rvfi_rs1_addr = rs1_addr;
 assign rvfi_rs2_addr = rs2_addr;
@@ -243,11 +271,14 @@ assign rvfi_rd_wdata = (rvfi_rd_addr == 5'h0) ? 32'h0 : rd_wdata;
 assign rvfi_pc_rdata = pc;
 assign rvfi_pc_wdata = next_pc;
 
-assign rvfi_mem_addr = 32'hx;
-assign rvfi_mem_rmask = 4'h0;
-assign rvfi_mem_wmask = 4'h0;
-assign rvfi_mem_rdata = 32'h0;
-assign rvfi_mem_wdata = 32'h0;
+assign rvfi_mem_addr = o_dmem_addr;
+wire [3:0] rvfm_rmask_w = 4'b1111;
+wire [3:0] rvfm_rmask_h = alu_result[1] ? (rvfm_rmask_w & 4'b1100) : (rvfm_rmask_w & 4'b0011);
+wire [3:0] rvfm_rmask_b = alu_result[0] ? (rvfm_rmask_h & 4'b1010) : (rvfm_rmask_h & 4'b0101);
+assign rvfi_mem_rmask = mem_width[1] ? rvfm_rmask_w : (mem_width[0] ? rvfm_rmask_h : rvfm_rmask_b);
+assign rvfi_mem_wmask = o_dmem_wmask;
+assign rvfi_mem_rdata = i_dmem_rdata;
+assign rvfi_mem_wdata = o_dmem_wdata;
 `endif
 endmodule
 
@@ -257,7 +288,8 @@ module decoder (
     output wire [4:0]  o_rs2_addr,
     output wire [4:0]  o_rd_addr,
     output wire        o_op1_sel,
-    output wire        o_op2_sel,
+    output wire        o_alu_op2_sel,
+    output wire        o_comp_op2_sel,
     output wire [5:0]  o_alu_op,
     output wire        o_alu_sub,
     output wire        o_alu_sltu,
@@ -270,7 +302,11 @@ module decoder (
     output wire        o_branch_equal,
     output wire        o_branch_unsigned,
     output wire        o_branch_invert,
-    output wire [31:0] o_imm
+    output wire [31:0] o_imm,
+    output wire        o_mem_ren,
+    output wire        o_mem_wen,
+    output wire [1:0]  o_mem_width,
+    output wire        o_mem_unsigned
 );
     wire [4:0] opcode = i_inst[6:2];
     wire [4:0] rs1 = i_inst[19:15];
@@ -309,7 +345,8 @@ module decoder (
     assign o_rd_sel[`RD_PC] = op_jal || op_jalr;
 
     assign o_op1_sel = op_branch || op_auipc || op_jal;
-    assign o_op2_sel = op_load || op_op_imm || op_auipc || op_store || op_lui || op_branch || op_jal || op_jalr;
+    assign o_alu_op2_sel = op_load || op_op_imm || op_auipc || op_store || op_lui || op_branch || op_jal || op_jalr;
+    assign o_comp_op2_sel = op_op_imm;
 
     wire op_inst = op_op_imm || op_op;
     assign o_alu_op[`ALU_OP_ADD] = (op_inst && alu_add) || op_load || op_auipc || op_store || op_lui || op_branch || op_jalr || op_jal;
@@ -318,7 +355,7 @@ module decoder (
     assign o_alu_op[`ALU_OP_XOR] = op_inst && alu_xor;
     assign o_alu_op[`ALU_OP_SLT] = op_inst && (alu_slt || alu_sltu);
     assign o_alu_op[`ALU_OP_SHIFT] = op_inst && (alu_sl || alu_sr);
-    assign o_alu_sub = op_inst && alu_add && alu_funct7;
+    assign o_alu_sub = op_op && alu_add && alu_funct7;
     assign o_alu_sltu = alu_sltu;
 
     assign o_shift_dir[`SHIFT_DIR_LEFT] = alu_sl;
@@ -327,7 +364,7 @@ module decoder (
 
     assign o_jump = op_jal || op_jalr;
     assign o_branch = op_branch;
-    assign o_branch_equal = funct3[2];
+    assign o_branch_equal = !funct3[2];
     assign o_branch_unsigned = funct3[1];
     assign o_branch_invert = funct3[0];
 
@@ -351,9 +388,14 @@ module decoder (
     assign o_imm[30:20] = format_u ? i_inst[30:20] : {11{i_inst[31]}};
     assign o_imm[31] = i_inst[31];
 
-    assign o_rs1_addr = rs1;
+    assign o_rs1_addr = rs1 & {5{!op_lui}};
     assign o_rs2_addr = rs2;
     assign o_rd_addr = rd;
+
+    assign o_mem_ren = op_load;
+    assign o_mem_wen = op_store;
+    assign o_mem_width = funct3[1:0];
+    assign o_mem_unsigned = funct3[2];
 
 `ifdef DISCRETE_FORMAL
     always @(*) begin
@@ -527,6 +569,7 @@ module shifter (
     wire [31:0] op_sl = {32{i_dir[0]}};
     wire [31:0] op_sr = {32{i_dir[1]}};
     assign o_result = (op_sl & sl0) | (op_sr & sr0);
+
 `ifdef DISCRETE_FORMAL
     always @(*) begin
         assume ((i_dir[0] + i_dir[1]) == 1);
