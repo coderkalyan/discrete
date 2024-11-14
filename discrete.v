@@ -57,7 +57,8 @@ module discrete_core (
     decoder id (
         .i_inst(inst),
         .o_rs1_addr(rs1_addr), .o_rs2_addr(rs2_addr), .o_rd_addr(rd_addr),
-        .o_rd_wen(rd_wen), .o_rd_sel(rd_sel),
+        .o_rd_wen(rd_wen),
+        .o_rd_sel(rd_sel),
         .o_op1_sel(op1_sel), .o_alu_op2_sel(alu_op2_sel), .o_comp_op2_sel(comp_op2_sel),
         .o_alu_op(alu_op), .o_alu_sub(alu_sub), .o_alu_sltu(alu_sltu),
         .o_shift_dir(shift_dir), .o_shift_arith(shift_arith),
@@ -75,7 +76,7 @@ module discrete_core (
         .i_clk(i_clk),
         .i_rs1_addr(rs1_addr), .i_rs2_addr(rs2_addr), .i_rd_addr(rd_addr),
         `ifdef RISCV_FORMAL
-        .i_rd_wen(rd_wen && rvfm_valid),
+        .i_rd_wen(rd_wen && rvfm_valid && !rvfm_trap),
         `else
         .i_rd_wen(rd_wen),
         `endif
@@ -219,7 +220,7 @@ reg [63:0] rvfm_retire_ctr;
 always @(posedge i_clk, negedge i_rst_n) begin
     if (!i_rst_n)
         rvfm_retire_ctr <= 64'h0;
-    else if (rvfm_valid)
+    else
         rvfm_retire_ctr <= rvfm_retire_ctr + 64'h1;
 end
 
@@ -265,7 +266,7 @@ assign rvfi_rs1_addr = rs1_addr;
 assign rvfi_rs2_addr = rs2_addr;
 assign rvfi_rs1_rdata = rs1_rdata;
 assign rvfi_rs2_rdata = rs2_rdata;
-assign rvfi_rd_addr = rd_wen ? rd_addr : 5'h0;
+assign rvfi_rd_addr = (rd_wen && !rvfm_trap) ? rd_addr : 5'h0;
 assign rvfi_rd_wdata = (rvfi_rd_addr == 5'h0) ? 32'h0 : rd_wdata;
 
 assign rvfi_pc_rdata = pc;
