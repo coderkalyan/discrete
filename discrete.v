@@ -229,7 +229,7 @@ reg rvfm_trap;
 always @(*) begin
     rvfm_trap = 1'b0;
 
-    if (!rvfm_valid && !i_rst_n) begin
+    if (!rvfm_valid && i_rst_n) begin
         rvfm_trap = 1'b1;
     end else begin
         case (rvfm_opcode)
@@ -253,7 +253,7 @@ always @(*) begin
     end
 end
 
-assign rvfi_valid = rvfm_valid;
+assign rvfi_valid = 1'b1; // rvfm_valid;
 assign rvfi_order = rvfm_retire_ctr;
 assign rvfi_insn  = inst;
 assign rvfi_trap  = rvfm_trap;

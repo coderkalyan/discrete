@@ -1,0 +1,18 @@
+Number of wires:                113
+   Number of wire bits:            220
+   Number of public wires:          40
+   Number of public wire bits:     147
+   Number of ports:                 24
+   Number of port bits:            107
+   Number of memories:               0
+   Number of memory bits:            0
+   Number of processes:              0
+   Number of cells:                130
+     $_ANDNOT_                      38
+     $_AND_                          8
+     $_MUX_                         23
+     $_NAND_                         3
+     $_NOR_                          5
+     $_NOT_                          2
+     $_ORNOT_                        9
+     $_OR_                          42
