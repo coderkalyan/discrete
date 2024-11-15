@@ -1,7 +1,5 @@
 `default_nettype none
 
-// `define DISCRETE_FORMAL
-
 `define ALU_OP_ADD 0
 `define ALU_OP_OR 1
 `define ALU_OP_AND 2
@@ -253,7 +251,7 @@ always @(*) begin
     end
 end
 
-assign rvfi_valid = 1'b1; // rvfm_valid;
+assign rvfi_valid = 1'b1;
 assign rvfi_order = rvfm_retire_ctr;
 assign rvfi_insn  = inst;
 assign rvfi_trap  = rvfm_trap;
@@ -341,7 +339,7 @@ module decoder (
     wire alu_and  = funct3 == 3'b111;
 
     assign o_rd_wen = op_load || op_op_imm || op_auipc || op_op || op_lui || op_jalr || op_jal;
-    assign o_rd_sel[`RD_ALU] = !o_rd_sel[`RD_MEM] && ~o_rd_sel[`RD_PC];
+    assign o_rd_sel[`RD_ALU] = !o_rd_sel[`RD_MEM] && !o_rd_sel[`RD_PC];
     assign o_rd_sel[`RD_MEM] = op_load;
     assign o_rd_sel[`RD_PC] = op_jal || op_jalr;
 
@@ -370,7 +368,7 @@ module decoder (
     assign o_branch_invert = funct3[0];
 
     // immediate decoding
-    wire format_r = op_op;
+    wire format_r = op_op || op_amo;
     wire format_i = op_op_imm || op_jalr || op_load;
     wire format_s = op_store;
     wire format_b = op_branch;
@@ -538,7 +536,7 @@ module alu (
 
         case (1'b1)
             i_op[`ALU_OP_ADD]: assert (o_result == (i_sub ? (i_op1 - i_op2) : (i_op1 + i_op2)));
-            i_op[`ALU_OP_OR]: assert (o_result == (i_op1 | i_op2));
+            i_op[`ALU_OP_OR]:  assert (o_result == (i_op1 | i_op2));
             i_op[`ALU_OP_AND]: assert (o_result == (i_op1 & i_op2));
             i_op[`ALU_OP_XOR]: assert (o_result == (i_op1 ^ i_op2));
             i_op[`ALU_OP_SLT]: assert (o_result == ({31'h0, i_sltu ? i_ltu : i_lt}));

@@ -6,6 +6,7 @@ depth 5
 smtbmc z3
 
 [script]
+verilog_defines -DDISCRETE_FORMAL
 read -formal discrete.v
 prep -top discrete_core
 
