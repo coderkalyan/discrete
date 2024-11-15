@@ -20,17 +20,17 @@ module discrete_core (
         `RVFI_OUTPUTS,
     `endif
 
-    input  wire [31:0] o_imem_addr,
-    output wire [31:0] i_imem_rdata,
+    output wire [31:0] o_imem_addr,
+    input  wire [31:0] i_imem_rdata,
     output wire [31:0] o_dmem_addr,
     output wire [31:0] o_dmem_wdata,
     output wire [3:0]  o_dmem_wmask,
-    input  wire        o_dmem_ren,
+    output wire        o_dmem_ren,
     input  wire [31:0] i_dmem_rdata,
 );
     reg [31:0] pc;
     wire [31:0] next_pc;
-    always @(posedge i_clk) begin
+    always @(posedge i_clk, negedge i_rst_n) begin
         if (!i_rst_n)
             pc <= 32'h0;
         else
@@ -415,13 +415,13 @@ module sram (
     input  wire [7:0] i_data,
     output wire [7:0] o_data
 );
-    reg [7:0] mem [31:0];
-    always @(*) begin
-        if (i_wen)
-            mem[i_addr] <= i_data;
-    end
-
-    assign o_data = mem[i_addr];
+    // reg [7:0] mem [31:0];
+    // always @(*) begin
+    //     if (i_wen)
+    //         mem[i_addr] <= i_data;
+    // end
+    //
+    // assign o_data = mem[i_addr];
 endmodule
 
 module rf (
