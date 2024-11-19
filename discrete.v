@@ -473,25 +473,6 @@ module rf (
 `endif
 endmodule
 
-// 32 bit ripple carry adder
-module rca (
-    input  wire [31:0] i_a,
-    input  wire [31:0] i_b,
-    input  wire        i_cin,
-    output wire [31:0] o_sum,
-    output wire [31:0] o_xor,
-    output wire [31:0] o_and
-);
-    wire [31:0] cin, cout;
-
-    assign cin[0] = i_cin;
-    assign o_xor = i_a ^ i_b;
-    assign o_sum = o_xor ^ cin;
-    assign o_and = i_a & i_b;
-    assign cout = o_and | (i_a & cin) | (i_b & cin);
-    assign cin[31:1] = cout[30:0];
-endmodule
-
 module alu (
     input  wire [5:0]  i_op,
     // assert to enable subtraction mode on the adder
@@ -505,28 +486,35 @@ module alu (
     input  wire        i_arith,
     output wire [31:0] o_result
 );
-    wire [31:0] or_result = i_op1 | i_op2;
+    wire op_or  = i_op[`ALU_OP_OR];
+    wire op_and = i_op[`ALU_OP_AND];
+    wire op_xor = i_op[`ALU_OP_XOR];
+    wire [1:0] bool = {op_and | op_or | i_op[`ALU_OP_ADD], op_xor | op_or};
+
+    wire [31:0] i_b = i_op2 ^ {32{i_sub}};
+    wire [31:0] xor_result = i_op1 ^ i_b;
+    wire [31:0] and_result = i_op1 & i_b;
+    wire [31:0] cin;
+    wire [31:0] bool_cin = {32{bool[0]}} | (cin & {32{i_op[`ALU_OP_ADD]}});
+    wire [31:0] bool_result = (xor_result & bool_cin) | (and_result & {32{bool[1]}});
+    wire [31:0] add_result = xor_result ^ cin;
+    wire [31:0] cout = bool_result;
+    assign cin = {cout[30:0], i_sub};
+
     wire slt_result = i_sltu ? i_ltu : i_lt;
-    wire [31:0] add_result, xor_result, and_result;
-    rca adder (
-        .i_a(i_op1), .i_b(i_op2 ^ {32{i_sub}}), .i_cin(i_sub),
-        .o_sum(add_result), .o_xor(xor_result), .o_and(and_result)
-    );
-
     wire [31:0] shift_result;
-    shifter shifter (
-        .i_op1(i_op1), .i_op2(i_op2[4:0]),
-        .i_dir(i_dir), .i_arith(i_arith),
-        .o_result(shift_result)
-    );
+    // shifter shifter (
+    //     .i_op1(i_op1), .i_op2(i_op2[4:0]),
+    //     .i_dir(i_dir), .i_arith(i_arith),
+    //     .o_result(shift_result)
+    // );
 
-    wire [31:0] op_add   = {32{i_op[`ALU_OP_ADD]}};
-    wire [31:0] op_or    = {32{i_op[`ALU_OP_OR]}};
-    wire [31:0] op_and   = {32{i_op[`ALU_OP_AND]}};
-    wire [31:0] op_xor   = {32{i_op[`ALU_OP_XOR]}};
-    wire [31:0] op_shift = {32{i_op[`ALU_OP_SHIFT]}};
+    wire [30:0] op_add   = {32{i_op[`ALU_OP_ADD]}};
+    wire [30:0] op_bool  = {32{op_or | op_and | op_xor}};
+    wire [30:0] op_shift = {32{i_op[`ALU_OP_SHIFT]}};
     wire        op_slt   = i_op[`ALU_OP_SLT];
-    assign o_result = (add_result & op_add) | (or_result & op_or) | (and_result & op_and) | (xor_result & op_xor) | ({31'h0, slt_result & op_slt}) | (shift_result & op_shift);
+    assign o_result[0] = (add_result[0] & op_add[0]) | (bool_result[0] & op_bool[0]) | (slt_result & op_slt) | (shift_result[0] & op_shift[0]);
+    assign o_result[31:1] = (add_result[31:1] & op_add) | (bool_result[31:1] & op_bool) | (shift_result[31:1] & op_shift);
 
 `ifdef DISCRETE_FORMAL
     always @(*) begin
