@@ -37,9 +37,22 @@ module discrete_core (
             pc <= next_pc;
     end
 
+    // if asserted, fetch just emitted a new instruction
+    // else, fetch is stalling and effectively buffering the same instruction
+    reg if_start;
+    wire if_stall;
+    always @(posedge i_clk, negedge i_rst_n) begin
+        if (!i_rst_n)
+            if_start <= 1'b1;
+        else if (!if_stall)
+            if_start <= !if_stall;
+    end
+
     assign o_imem_addr = pc;
     wire [31:0] inst = i_imem_rdata;
 
+    // now that we have {inst, pc, if_start} as the output of the fetch stage,
+    // everything through decode and most of execute is combinational
     wire [4:0] rs1_addr, rs2_addr, rd_addr;
     wire rd_wen;
     wire [2:0] rd_sel;
@@ -107,13 +120,39 @@ module discrete_core (
     wire [3:0] wmask_w = {4{mem_wen}};
     wire [3:0] wmask_h = alu_result[1] ? (wmask_w & 4'b1100) : (wmask_w & 4'b0011);
     wire [3:0] wmask_b = alu_result[0] ? (wmask_h & 4'b1010) : (wmask_h & 4'b0101);
-    assign o_dmem_wmask = mem_width[1] ? wmask_w : (mem_width[0] ? wmask_h : wmask_b);
 
-    wire [31:0] sw = rs2_rdata;
-    wire [31:0] sh = alu_result[1] ? {sw[15:0], 16'h0} : sw;
-    wire [31:0] sb = alu_result[0] ? {sh[23:0], 8'h0}  : sh;
+    wire [1:0] shift_amount = {alu_result[1] && !mem_width[1], alu_result[0] && !mem_width[0]};
+    wire shift_nop = shift_amount == 2'b00;
+    wire [31:0] store_data;
+    wire shift_done;
+    byte_shifter shifter (
+        .i_clk(i_clk), .i_rst_n(i_rst_n),
+        .i_operand(rs2_rdata), .i_amount(shift_amount),
+        .i_start(if_start), .o_result(store_data), .o_done(shift_done)
+    );
 
-    assign o_dmem_wdata = mem_width[1] ? sw : (mem_width[0] ? sh : sb);
+    wire mem_word = mem_width[1];
+    wire mem_half = mem_width[0];
+    wire mem_byte = !(mem_word | mem_half);
+
+    wire half0 = mem_half && !alu_result[1];
+    wire half1 = mem_half &&  alu_result[1];
+    wire byte0 = mem_byte && !alu_result[1] && !alu_result[0];
+    wire byte1 = mem_byte && !alu_result[1] && !alu_result[0];
+    wire byte2 = mem_byte &&  alu_result[1] && !alu_result[0];
+    wire byte3 = mem_byte &&  alu_result[1] && !alu_result[0];
+
+    wire [3:0] wmask;
+    assign wmask[3] = mem_word || half1 || byte3;
+    assign wmask[2] = mem_word || half1 || byte2;
+    assign wmask[1] = mem_word || half0 || byte1;
+    assign wmask[0] = mem_word || half0 || byte0;
+
+    assign o_dmem_wmask = wmask;
+    assign o_dmem_wdata = shift_nop ? rs2_rdata : store_data;
+
+    // only store instructions stall, until the byte shifter is done
+    assign if_stall = mem_wen && !shift_nop && (if_start || !shift_done);
 
     // TODO: this is only correct if legal memory access boundaries are word
     // aligned
@@ -133,7 +172,7 @@ module discrete_core (
     wire [31:0] pc_inc = pc + 32'h4;
 `endif
     wire pc_sel = jump || (branch && take);
-    assign next_pc = pc_sel ? {alu_result[31:1], 1'b0} : pc_inc;
+    assign next_pc = if_stall ? pc : (pc_sel ? {alu_result[31:1], 1'b0} : pc_inc);
 
     wire [31:0] rd_sel_alu = {32{rd_sel[`RD_ALU]}};
     wire [31:0] rd_sel_mem = {32{rd_sel[`RD_MEM]}};
@@ -218,7 +257,7 @@ reg [63:0] rvfm_retire_ctr;
 always @(posedge i_clk, negedge i_rst_n) begin
     if (!i_rst_n)
         rvfm_retire_ctr <= 64'h0;
-    else
+    else if (!if_stall)
         rvfm_retire_ctr <= rvfm_retire_ctr + 64'h1;
 end
 
@@ -251,7 +290,7 @@ always @(*) begin
     end
 end
 
-assign rvfi_valid = 1'b1;
+assign rvfi_valid = !if_stall; // 1'b1;
 assign rvfi_order = rvfm_retire_ctr;
 assign rvfi_insn  = inst;
 assign rvfi_trap  = rvfm_trap;
@@ -453,8 +492,8 @@ module rf (
         if (i_rd_wen)
             file[i_rd_addr] <= i_rd_wdata;
 `else
-    sram bank0 [3:0] (.i_addr(addr0), .i_wen(wen), .i_data(i_rd_wdata), .o_data(rs1_rdata));
-    sram bank1 [3:0] (.i_addr(addr1), .i_wen(wen), .i_data(i_rd_wdata), .o_data(rs2_rdata));
+    // sram bank0 [3:0] (.i_addr(addr0), .i_wen(wen), .i_data(i_rd_wdata), .o_data(rs1_rdata));
+    // sram bank1 [3:0] (.i_addr(addr1), .i_wen(wen), .i_data(i_rd_wdata), .o_data(rs2_rdata));
 `endif
 
     // on read, the RAMs will drive the data lines with read data
@@ -503,11 +542,11 @@ module alu (
 
     wire slt_result = i_sltu ? i_ltu : i_lt;
     wire [31:0] shift_result;
-    // shifter shifter (
-    //     .i_op1(i_op1), .i_op2(i_op2[4:0]),
-    //     .i_dir(i_dir), .i_arith(i_arith),
-    //     .o_result(shift_result)
-    // );
+    shifter shifter (
+        .i_op1(i_op1), .i_op2(i_op2[4:0]),
+        .i_dir(i_dir), .i_arith(i_arith),
+        .o_result(shift_result)
+    );
 
     wire [30:0] op_add   = {32{i_op[`ALU_OP_ADD]}};
     wire [30:0] op_bool  = {32{op_or | op_and | op_xor}};
@@ -593,6 +632,35 @@ module comparator (
         assert (o_ltu == (i_op1 < i_op2));
     end
 `endif
+endmodule
+
+module byte_shifter (
+    input  wire        i_clk,
+    input  wire        i_rst_n,
+    input  wire [31:0] i_operand,
+    input  wire [1:0]  i_amount,
+    input  wire        i_start,
+    output wire [31:0] o_result,
+    output wire        o_done
+);
+    reg [1:0] amount;
+    reg [31:0] result;
+    reg done;
+
+    wire [1:0] next_amount = i_start ? i_amount : (amount - 2'd1);
+    wire [31:0] next_result = i_start ? i_operand : {result[23:0], 8'h00};
+    wire next_done = next_amount == 2'd0;
+    always @(posedge i_clk, negedge i_rst_n) begin
+        if (!i_rst_n) begin
+            amount <= 2'd0;
+            result <= 32'd0;
+            done <= 1'b0;
+        end else begin
+            amount <= next_amount;
+            result <= next_result;
+            done <= next_done;
+        end
+    end
 endmodule
 
 module lsu (
