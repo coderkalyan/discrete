@@ -117,18 +117,16 @@ module discrete_core (
     assign o_dmem_addr  = {alu_result[31:2], 2'b00};
     assign o_dmem_ren   = mem_ren;
 
-    wire [3:0] wmask_w = {4{mem_wen}};
-    wire [3:0] wmask_h = alu_result[1] ? (wmask_w & 4'b1100) : (wmask_w & 4'b0011);
-    wire [3:0] wmask_b = alu_result[0] ? (wmask_h & 4'b1010) : (wmask_h & 4'b0101);
-
     wire [1:0] shift_amount = {alu_result[1] && !mem_width[1], alu_result[0] && !mem_width[0]};
+    wire [1:0] bshift_dir = {mem_wen, mem_ren};
     wire shift_nop = shift_amount == 2'b00;
-    wire [31:0] store_data;
+    wire [31:0] shift_data;
     wire shift_done;
     byte_shifter shifter (
         .i_clk(i_clk), .i_rst_n(i_rst_n),
-        .i_operand(rs2_rdata), .i_amount(shift_amount),
-        .i_start(if_start), .o_result(store_data), .o_done(shift_done)
+        .i_operand(mem_ren ? i_dmem_rdata : rs2_rdata), .i_amount(shift_amount),
+        .i_start(if_start), .i_dir(bshift_dir), .i_arith(shift_arith),
+        .o_result(shift_data), .o_done(shift_done)
     );
 
     wire mem_word = mem_width[1];
@@ -138,33 +136,37 @@ module discrete_core (
     wire half0 = mem_half && !alu_result[1];
     wire half1 = mem_half &&  alu_result[1];
     wire byte0 = mem_byte && !alu_result[1] && !alu_result[0];
-    wire byte1 = mem_byte && !alu_result[1] && !alu_result[0];
+    wire byte1 = mem_byte && !alu_result[1] &&  alu_result[0];
     wire byte2 = mem_byte &&  alu_result[1] && !alu_result[0];
-    wire byte3 = mem_byte &&  alu_result[1] && !alu_result[0];
+    wire byte3 = mem_byte &&  alu_result[1] &&  alu_result[0];
 
     wire [3:0] wmask;
-    assign wmask[3] = mem_word || half1 || byte3;
-    assign wmask[2] = mem_word || half1 || byte2;
-    assign wmask[1] = mem_word || half0 || byte1;
-    assign wmask[0] = mem_word || half0 || byte0;
+    assign wmask[3] = mem_wen && (mem_word || half1 || byte3);
+    assign wmask[2] = mem_wen && (mem_word || half1 || byte2);
+    assign wmask[1] = mem_wen && (mem_word || half0 || byte1);
+    assign wmask[0] = mem_wen && (mem_word || half0 || byte0);
 
     assign o_dmem_wmask = wmask;
-    assign o_dmem_wdata = shift_nop ? rs2_rdata : store_data;
-
-    // only store instructions stall, until the byte shifter is done
-    assign if_stall = mem_wen && !shift_nop && (if_start || !shift_done);
+    assign o_dmem_wdata = shift_nop ? rs2_rdata : shift_data;
 
     // TODO: this is only correct if legal memory access boundaries are word
     // aligned
-    wire [31:0] lw = i_dmem_rdata;
-    wire [15:0] lh = alu_result[1] ? lw[31:16] : lw[15:0];
-    wire [7:0]  lb = alu_result[0] ? lh[15:8] : lh[7:0];
+    // wire [31:0] lw = i_dmem_rdata;
+    // wire [15:0] lh = alu_result[1] ? lw[31:16] : lw[15:0];
+    // wire [7:0]  lb = alu_result[0] ? lh[15:8] : lh[7:0];
 
-    wire sign = !mem_unsigned && (mem_width[0] ? lh[15] : lb[7]);
-    wire [31:0] load_result;
-    assign load_result[31:16] = mem_width[1] ? lw[31:16] : {16{sign}};
-    assign load_result[15:8]  = mem_width[1] ? lw[15:8]  : (mem_width[0] ? lh[15:8] : {8{sign}});
-    assign load_result[7:0]   = mem_width[1] ? lw[7:0]   : (mem_width[0] ? lh[7:0]  : lb);
+    // wire sign = !mem_unsigned && (mem_width[0] ? lh[15] : lb[7]);
+    // wire [31:0] load_result;
+    // assign load_result[31:16] = mem_width[1] ? lw[31:16] : {16{sign}};
+    // assign load_result[15:8]  = mem_width[1] ? lw[15:8]  : (mem_width[0] ? lh[15:8] : {8{sign}});
+    // assign load_result[7:0]   = mem_width[1] ? lw[7:0]   : (mem_width[0] ? lh[7:0]  : lb);
+    wire [31:0] load_data = shift_nop ? i_dmem_rdata : shift_data;
+    wire [31:0] load_mask = {{16{mem_word}}, {8{mem_word || mem_half}}, 8'hff};
+    wire [31:0] load_sign = {32{!mem_unsigned && (mem_half ? load_data[15] : load_data[7])}};
+    wire [31:0] load_result = (load_data & load_mask) | (load_sign & ~load_mask);
+
+    // only load/store instructions stall, until the byte shifter is done
+    assign if_stall = (mem_wen || mem_ren) && !shift_nop && (if_start || !shift_done);
 
 `ifdef RISCV_FORMAL
     wire [31:0] pc_inc = !rvfm_valid ? pc : (pc + 32'h4);
@@ -398,7 +400,7 @@ module decoder (
 
     assign o_shift_dir[`SHIFT_DIR_LEFT] = alu_sl;
     assign o_shift_dir[`SHIFT_DIR_RIGHT] = alu_sr;
-    assign o_shift_arith = alu_funct7;
+    assign o_shift_arith = alu_funct7 || op_store;
 
     assign o_jump = op_jal || op_jalr;
     assign o_branch = op_branch;
@@ -640,6 +642,8 @@ module byte_shifter (
     input  wire [31:0] i_operand,
     input  wire [1:0]  i_amount,
     input  wire        i_start,
+    input  wire [1:0]  i_dir, // bit 0 = left, bit 1 = right
+    input  wire        i_arith,
     output wire [31:0] o_result,
     output wire        o_done
 );
@@ -648,7 +652,9 @@ module byte_shifter (
     reg done;
 
     wire [1:0] next_amount = i_start ? i_amount : (amount - 2'd1);
-    wire [31:0] next_result = i_start ? i_operand : {result[23:0], 8'h00};
+    wire sign = i_arith && i_operand[31];
+    wire [31:0] shift_result = (i_dir[0] & {result[23:0], 8'h00}) | (i_dir[1] & {{8{sign}}, result[31:8]});
+    wire [31:0] next_result = i_start ? i_operand : shift_result;
     wire next_done = next_amount == 2'd0;
     always @(posedge i_clk, negedge i_rst_n) begin
         if (!i_rst_n) begin
