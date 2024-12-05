@@ -157,16 +157,7 @@ module discrete_core (
     assign o_dmem_wdata = shift_data; // shift_nop ? rs2_rdata : shift_data;
 
     // TODO: this is only correct if legal memory access boundaries are word
-    // aligned
-    // wire [31:0] lw = i_dmem_rdata;
-    // wire [15:0] lh = alu_result[1] ? lw[31:16] : lw[15:0];
-    // wire [7:0]  lb = alu_result[0] ? lh[15:8] : lh[7:0];
-
-    // wire sign = !mem_unsigned && (mem_width[0] ? lh[15] : lb[7]);
-    // wire [31:0] load_result;
-    // assign load_result[31:16] = mem_width[1] ? lw[31:16] : {16{sign}};
-    // assign load_result[15:8]  = mem_width[1] ? lw[15:8]  : (mem_width[0] ? lh[15:8] : {8{sign}});
-    // assign load_result[7:0]   = mem_width[1] ? lw[7:0]   : (mem_width[0] ? lh[7:0]  : lb);
+    // aligned, should add proper read masking (this isn't expensive)
     wire [31:0] load_data = shift_data;
     wire [31:0] load_mask = {{16{mem_word}}, {8{mem_word || mem_half}}, 8'hff};
     wire [31:0] load_sign = {32{!mem_unsigned && (mem_half ? load_data[15] : load_data[7])}};
@@ -685,12 +676,3 @@ module byte_shifter (
     assign o_result = result;
     assign o_done = done;
 endmodule
-
-// module lsu (
-//     input  wire [31:0] i_wdata,
-//     output wire [31:0] o_mem_wdata,
-//     output wire [3:0]  o_mem_wmask,
-//     input  wire [31:0] i_mem_rdata,
-//     output wire [31:0] o_rdata
-// );
-// endmodule
