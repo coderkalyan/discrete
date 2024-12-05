@@ -12,6 +12,10 @@
 `define RD_MEM 1
 `define RD_PC 2
 
+`ifndef RVFI_OUTPUTS
+    `define RVFI_OUTPUTS
+`endif
+
 module discrete_core (
     input  wire        i_clk,
     input  wire        i_rst_n,
@@ -26,7 +30,7 @@ module discrete_core (
     output wire [31:0] o_dmem_wdata,
     output wire [3:0]  o_dmem_wmask,
     output wire        o_dmem_ren,
-    input  wire [31:0] i_dmem_rdata,
+    input  wire [31:0] i_dmem_rdata
 );
     reg [31:0] pc;
     wire [31:0] next_pc;
@@ -44,8 +48,10 @@ module discrete_core (
     always @(posedge i_clk, negedge i_rst_n) begin
         if (!i_rst_n)
             if_start <= 1'b1;
-        else if (!if_stall)
+        else
             if_start <= !if_stall;
+        // else if (!if_stall)
+        //     if_start <= !if_stall;
     end
 
     assign o_imem_addr = pc;
@@ -87,9 +93,9 @@ module discrete_core (
         .i_clk(i_clk),
         .i_rs1_addr(rs1_addr), .i_rs2_addr(rs2_addr), .i_rd_addr(rd_addr),
         `ifdef RISCV_FORMAL
-        .i_rd_wen(rd_wen && rvfm_valid && !rvfm_trap),
+        .i_rd_wen(rd_wen && !if_stall && rvfm_valid && !rvfm_trap),
         `else
-        .i_rd_wen(rd_wen),
+        .i_rd_wen(rd_wen && !if_stall),
         `endif
         .i_rd_wdata(rd_wdata),
         .o_rs1_rdata(rs1_rdata), .o_rs2_rdata(rs2_rdata)
@@ -118,13 +124,14 @@ module discrete_core (
     assign o_dmem_ren   = mem_ren;
 
     wire [1:0] shift_amount = {alu_result[1] && !mem_width[1], alu_result[0] && !mem_width[0]};
-    wire [1:0] bshift_dir = {mem_wen, mem_ren};
+    wire [1:0] bshift_dir = {mem_ren, mem_wen};
     wire shift_nop = shift_amount == 2'b00;
     wire [31:0] shift_data;
     wire shift_done;
+    wire [31:0] bshift_operand = mem_ren ? i_dmem_rdata : rs2_rdata;
     byte_shifter shifter (
         .i_clk(i_clk), .i_rst_n(i_rst_n),
-        .i_operand(mem_ren ? i_dmem_rdata : rs2_rdata), .i_amount(shift_amount),
+        .i_operand(bshift_operand), .i_amount(shift_amount),
         .i_start(if_start), .i_dir(bshift_dir), .i_arith(shift_arith),
         .o_result(shift_data), .o_done(shift_done)
     );
@@ -147,7 +154,7 @@ module discrete_core (
     assign wmask[0] = mem_wen && (mem_word || half0 || byte0);
 
     assign o_dmem_wmask = wmask;
-    assign o_dmem_wdata = shift_nop ? rs2_rdata : shift_data;
+    assign o_dmem_wdata = shift_data; // shift_nop ? rs2_rdata : shift_data;
 
     // TODO: this is only correct if legal memory access boundaries are word
     // aligned
@@ -160,13 +167,13 @@ module discrete_core (
     // assign load_result[31:16] = mem_width[1] ? lw[31:16] : {16{sign}};
     // assign load_result[15:8]  = mem_width[1] ? lw[15:8]  : (mem_width[0] ? lh[15:8] : {8{sign}});
     // assign load_result[7:0]   = mem_width[1] ? lw[7:0]   : (mem_width[0] ? lh[7:0]  : lb);
-    wire [31:0] load_data = shift_nop ? i_dmem_rdata : shift_data;
+    wire [31:0] load_data = shift_data;
     wire [31:0] load_mask = {{16{mem_word}}, {8{mem_word || mem_half}}, 8'hff};
     wire [31:0] load_sign = {32{!mem_unsigned && (mem_half ? load_data[15] : load_data[7])}};
     wire [31:0] load_result = (load_data & load_mask) | (load_sign & ~load_mask);
 
     // only load/store instructions stall, until the byte shifter is done
-    assign if_stall = (mem_wen || mem_ren) && !shift_nop && (if_start || !shift_done);
+    assign if_stall = (mem_wen || mem_ren) && (if_start || !shift_done);
 
 `ifdef RISCV_FORMAL
     wire [31:0] pc_inc = !rvfm_valid ? pc : (pc + 32'h4);
@@ -292,6 +299,13 @@ always @(*) begin
     end
 end
 
+always @(posedge i_clk) begin
+    if (!$initstate && ($past(if_stall))) begin
+        assume ($stable(inst));
+        assume ($stable(i_dmem_rdata));
+    end
+end
+
 assign rvfi_valid = !if_stall; // 1'b1;
 assign rvfi_order = rvfm_retire_ctr;
 assign rvfi_insn  = inst;
@@ -312,7 +326,7 @@ assign rvfi_pc_rdata = pc;
 assign rvfi_pc_wdata = next_pc;
 
 assign rvfi_mem_addr = o_dmem_addr;
-wire [3:0] rvfm_rmask_w = 4'b1111;
+wire [3:0] rvfm_rmask_w = {4{rvfi_valid}}; // 4'b1111;
 wire [3:0] rvfm_rmask_h = alu_result[1] ? (rvfm_rmask_w & 4'b1100) : (rvfm_rmask_w & 4'b0011);
 wire [3:0] rvfm_rmask_b = alu_result[0] ? (rvfm_rmask_h & 4'b1010) : (rvfm_rmask_h & 4'b0101);
 assign rvfi_mem_rmask = mem_width[1] ? rvfm_rmask_w : (mem_width[0] ? rvfm_rmask_h : rvfm_rmask_b);
@@ -530,14 +544,14 @@ module alu (
     wire op_or  = i_op[`ALU_OP_OR];
     wire op_and = i_op[`ALU_OP_AND];
     wire op_xor = i_op[`ALU_OP_XOR];
-    wire [1:0] bool = {op_and | op_or | i_op[`ALU_OP_ADD], op_xor | op_or};
+    wire [1:0] bool_op = {op_and | op_or | i_op[`ALU_OP_ADD], op_xor | op_or};
 
     wire [31:0] i_b = i_op2 ^ {32{i_sub}};
     wire [31:0] xor_result = i_op1 ^ i_b;
     wire [31:0] and_result = i_op1 & i_b;
     wire [31:0] cin;
-    wire [31:0] bool_cin = {32{bool[0]}} | (cin & {32{i_op[`ALU_OP_ADD]}});
-    wire [31:0] bool_result = (xor_result & bool_cin) | (and_result & {32{bool[1]}});
+    wire [31:0] bool_cin = {32{bool_op[0]}} | (cin & {32{i_op[`ALU_OP_ADD]}});
+    wire [31:0] bool_result = (xor_result & bool_cin) | (and_result & {32{bool_op[1]}});
     wire [31:0] add_result = xor_result ^ cin;
     wire [31:0] cout = bool_result;
     assign cin = {cout[30:0], i_sub};
@@ -653,7 +667,7 @@ module byte_shifter (
 
     wire [1:0] next_amount = i_start ? i_amount : (amount - 2'd1);
     wire sign = i_arith && i_operand[31];
-    wire [31:0] shift_result = (i_dir[0] & {result[23:0], 8'h00}) | (i_dir[1] & {{8{sign}}, result[31:8]});
+    wire [31:0] shift_result = ({32{i_dir[0]}} & {result[23:0], 8'h00}) | ({32{i_dir[1]}} & {{8{sign}}, result[31:8]});
     wire [31:0] next_result = i_start ? i_operand : shift_result;
     wire next_done = next_amount == 2'd0;
     always @(posedge i_clk, negedge i_rst_n) begin
@@ -667,13 +681,16 @@ module byte_shifter (
             done <= next_done;
         end
     end
+
+    assign o_result = result;
+    assign o_done = done;
 endmodule
 
-module lsu (
-    input  wire [31:0] i_wdata,
-    output wire [31:0] o_mem_wdata,
-    output wire [3:0]  o_mem_wmask,
-    input  wire [31:0] i_mem_rdata,
-    output wire [31:0] o_rdata
-);
-endmodule
+// module lsu (
+//     input  wire [31:0] i_wdata,
+//     output wire [31:0] o_mem_wdata,
+//     output wire [3:0]  o_mem_wmask,
+//     input  wire [31:0] i_mem_rdata,
+//     output wire [31:0] o_rdata
+// );
+// endmodule
